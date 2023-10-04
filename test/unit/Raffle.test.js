@@ -21,9 +21,7 @@ const { assert, expect } = require("chai")
 
           describe("Constructor", function () {
               it("Initializes the raffle correctly", async function () {
-                  // idealy we make our test have just 1 assert per it
-                  const raffleState = await raffle.getRaffleState() // enums get back as numbers: 0, 1, ...
-                  console.log(raffleState)
+                  const raffleState = await raffle.getRaffleState()
                   assert.equal(raffleState.toString(), "0")
                   assert.equal(interval.toString(), networkConfig[chainId]["interval"])
               })
@@ -158,7 +156,7 @@ const { assert, expect } = require("chai")
                       const accountConnectedRaffle = raffle.connect(accounts[i])
                       await accountConnectedRaffle.enterRaffle({ value: raffleEntranceFee })
                   }
-                  const startingTimeStamp = await raffle.getLastTimeStamp()
+                  const startingTimeStamp = await raffle.getLatestTimeStamp()
                   await new Promise(async (resolve, reject) => {
                       raffle.once("WinnerPicked", async () => {
                           // once the WinnerPicked event is fired, do something..
@@ -172,7 +170,7 @@ const { assert, expect } = require("chai")
                               //   console.log(accounts[2].address)
                               //   console.log(accounts[3].address)
                               const raffleState = await raffle.getRaffleState()
-                              const endintTimeStamp = await raffle.getLastTimeStamp()
+                              const endintTimeStamp = await raffle.getLatestTimeStamp()
                               const numPlayers = await raffle.getNumberOfPlayers()
                               const winnerEndingBalance = await accounts[1].getBalance()
                               assert.equal(numPlayers.toString(), "0")

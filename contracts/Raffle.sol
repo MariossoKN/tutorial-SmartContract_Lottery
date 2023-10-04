@@ -2,165 +2,180 @@
 
 pragma solidity ^0.8.7;
 
-// Errors
-error Vote__OnlyOwnerCanCallThisFunction();
-error Vote__VoterAlreadyRegistered();
-error Vote__VoterInformationMissing();
-error Vote__CandidateAlreadyRegistered();
-error Vote__CandidateInformationMissing();
-error Vote__YouAlreadyVoted();
-error Vote__YouAreNotARegisteredVoter();
-error Vote__CandidateAddressDoesntExist();
+import {VRFCoordinatorV2Interface} from "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
+import {VRFConsumerBaseV2} from "@chainlink/contracts/src/v0.8/VRFConsumerBaseV2.sol";
+import {AutomationCompatibleInterface} from "@chainlink/contracts/src/v0.8/interfaces/AutomationCompatibleInterface.sol";
 
-contract Vote {
-    // voters have to register
-    // they can register only once (one address)
-    // they will have a special voting number
-    // only one candidate/address
-    // candidates have to have a number
-    // function to vote to a candidate
-    // function to choose a winner with most votes
+/* Errors */
+error Raffle__UpkeepNotNeeded(uint256 currentBalance, uint256 numPlayers, uint256 raffleState);
+error Raffle__TransferFailed();
+error Raffle__SendMoreToEnterRaffle();
+error Raffle__RaffleNotOpen();
 
-    // State variables
-    struct Voter {
-        address voterAddress;
-        string voterName;
-        uint256 voterIdNumber;
-        uint256 voterNumber;
-        bool voted;
+/**@title A sample Raffle Contract
+ * @author Mariosso
+ * @notice This contract is for creating a sample raffle contract
+ * @dev This implements the Chainlink VRF Version 2
+ */
+contract Raffle is VRFConsumerBaseV2, AutomationCompatibleInterface {
+    /* Type declarations */
+    enum RaffleState {
+        OPEN,
+        CALCULATING
+    }
+    /* State variables */
+    // Chainlink VRF Variables
+    VRFCoordinatorV2Interface private immutable i_vrfCoordinator;
+    uint64 private immutable i_subscriptionId;
+    bytes32 private immutable i_gasLane;
+    uint32 private immutable i_callbackGasLimit;
+    uint16 private constant REQUEST_CONFIRMATIONS = 3;
+    uint32 private constant NUM_WORDS = 1;
+
+    // Lottery Variables
+    uint256 private immutable i_interval;
+    uint256 private immutable i_entranceFee;
+    uint256 private s_lastTimeStamp;
+    address private s_recentWinner;
+    address payable[] private s_players;
+    RaffleState private s_raffleState;
+
+    /* Events */
+    event RequestedRaffleWinner(uint256 indexed requestId);
+    event RaffleEnter(address indexed player);
+    event WinnerPicked(address indexed player);
+
+    /* Functions */
+    constructor(
+        address vrfCoordinatorV2,
+        uint64 subscriptionId,
+        bytes32 gasLane, // keyHash
+        uint256 interval,
+        uint256 entranceFee,
+        uint32 callbackGasLimit
+    ) VRFConsumerBaseV2(vrfCoordinatorV2) {
+        i_vrfCoordinator = VRFCoordinatorV2Interface(vrfCoordinatorV2);
+        i_gasLane = gasLane;
+        i_interval = interval;
+        i_subscriptionId = subscriptionId;
+        i_entranceFee = entranceFee;
+        s_raffleState = RaffleState.OPEN;
+        s_lastTimeStamp = block.timestamp;
+        i_callbackGasLimit = callbackGasLimit;
     }
 
-    struct Candidate {
-        address candidateAddress;
-        string candidateName;
-        uint256 candidateNumber;
-        uint256 votes;
-    }
-
-    address[] private voters;
-    address[] private candidates;
-    address private owner;
-    uint256 private voterCurrentNumber = 1;
-    uint256 numberOfVotes;
-    uint256 winnerCandidateVotes;
-    address winnerCandidateAddress;
-    string winnerCandidateName;
-    mapping(address => Voter) voterAddressToVoter;
-    mapping(address => Candidate) candidateAddressToCandidate;
-
-    // Functions
-    constructor() {
-        owner = msg.sender;
-    }
-
-    function registerVoter(string memory _voterName, uint256 _voterIdNumber) public {
-        if (voterAddressToVoter[msg.sender].voterAddress == msg.sender) {
-            revert Vote__VoterAlreadyRegistered();
+    function enterRaffle() public payable {
+        if (msg.value < i_entranceFee) {
+            revert Raffle__SendMoreToEnterRaffle();
         }
-        bytes memory checkString = bytes(_voterName);
-        if (checkString.length == 0 || _voterIdNumber == 0) {
-            revert Vote__VoterInformationMissing();
+        if (s_raffleState != RaffleState.OPEN) {
+            revert Raffle__RaffleNotOpen();
         }
-        voterAddressToVoter[msg.sender].voterAddress = msg.sender;
-        voterAddressToVoter[msg.sender].voterName = _voterName;
-        voterAddressToVoter[msg.sender].voterIdNumber = _voterIdNumber;
-        voterAddressToVoter[msg.sender].voterNumber = voterCurrentNumber++;
-        voterAddressToVoter[msg.sender].voted = false;
-        voters.push(msg.sender);
+        s_players.push(payable(msg.sender));
+        // Emit an event when we update a dynamic array or mapping
+        emit RaffleEnter(msg.sender);
     }
 
-    function registerCandidate(
-        address _candidateAddress,
-        string memory _candidateName,
-        uint256 _candidateNumber
-    ) public {
-        if (msg.sender != owner) {
-            revert Vote__OnlyOwnerCanCallThisFunction();
+    /**
+     * @dev This is the function that the Chainlink Keeper nodes call
+     * they look for `upkeepNeeded` to return True.
+     * the following should be true for this to return true:
+     * 1. The time interval has passed between raffle runs.
+     * 2. The lottery is open.
+     * 3. The contract has ETH.
+     * 4. Implicity, your subscription is funded with LINK.
+     */
+    function checkUpkeep(
+        bytes memory /* checkData */
+    ) public view override returns (bool upkeepNeeded, bytes memory /* performData */) {
+        bool isOpen = RaffleState.OPEN == s_raffleState;
+        bool timePassed = ((block.timestamp - s_lastTimeStamp) > i_interval);
+        bool hasPlayers = s_players.length > 0;
+        bool hasBalance = address(this).balance > 0;
+        upkeepNeeded = (timePassed && isOpen && hasBalance && hasPlayers);
+        return (upkeepNeeded, "0x0");
+    }
+
+    /**
+     * @dev Once `checkUpkeep` is returning `true`, this function is called
+     * and it kicks off a Chainlink VRF call to get a random winner.
+     */
+    function performUpkeep(bytes calldata /* performData */) external override {
+        (bool upkeepNeeded, ) = checkUpkeep("");
+        if (!upkeepNeeded) {
+            revert Raffle__UpkeepNotNeeded(
+                address(this).balance,
+                s_players.length,
+                uint256(s_raffleState)
+            );
         }
-        if (candidateAddressToCandidate[_candidateAddress].candidateAddress == _candidateAddress) {
-            revert Vote__CandidateAlreadyRegistered();
+        s_raffleState = RaffleState.CALCULATING;
+        uint256 requestId = i_vrfCoordinator.requestRandomWords(
+            i_gasLane,
+            i_subscriptionId,
+            REQUEST_CONFIRMATIONS,
+            i_callbackGasLimit,
+            NUM_WORDS
+        );
+        emit RequestedRaffleWinner(requestId);
+    }
+
+    /**
+     * @dev This is the function that Chainlink VRF node
+     * calls to send the money to the random winner.
+     */
+    function fulfillRandomWords(
+        uint256 /* requestId */,
+        uint256[] memory randomWords
+    ) internal override {
+        uint256 indexOfWinner = randomWords[0] % s_players.length;
+        address payable recentWinner = s_players[indexOfWinner];
+        s_recentWinner = recentWinner;
+        s_players = new address payable[](0);
+        s_raffleState = RaffleState.OPEN;
+        s_lastTimeStamp = block.timestamp;
+        (bool success, ) = recentWinner.call{value: address(this).balance}("");
+        if (!success) {
+            revert Raffle__TransferFailed();
         }
-        if (_candidateNumber == 0) {
-            revert Vote__CandidateInformationMissing();
-        }
-        candidateAddressToCandidate[_candidateAddress].candidateAddress = _candidateAddress;
-        candidateAddressToCandidate[_candidateAddress].candidateName = _candidateName;
-        candidateAddressToCandidate[_candidateAddress].candidateNumber = _candidateNumber;
-        candidateAddressToCandidate[_candidateAddress].votes = 0;
-        candidates.push(_candidateAddress);
+        emit WinnerPicked(recentWinner);
     }
 
-    function voteToCandidate(address _candidateAddress) public {
-        if (voterAddressToVoter[msg.sender].voterNumber == 0) {
-            revert Vote__YouAreNotARegisteredVoter();
-        }
-        if (voterAddressToVoter[msg.sender].voted == true) {
-            revert Vote__YouAlreadyVoted();
-        }
-        if (candidateAddressToCandidate[_candidateAddress].candidateAddress != _candidateAddress) {
-            revert Vote__CandidateAddressDoesntExist();
-        }
-        candidateAddressToCandidate[_candidateAddress].votes++;
-        voterAddressToVoter[msg.sender].voted = true;
-        numberOfVotes++;
+    /** Getter Functions */
+
+    function getRaffleState() public view returns (RaffleState) {
+        return s_raffleState;
     }
 
-    function pickWinnerCandidate() public returns (uint256, address, string memory) {
-        if (msg.sender != owner) {
-            revert Vote__OnlyOwnerCanCallThisFunction();
-        }
-        uint256 winnerVotes;
-        address winnerAddress;
-        string memory winnerName;
-        for (uint256 candidatesIndex = 0; candidatesIndex < candidates.length; candidatesIndex++) {
-            address candidatesAddress = candidates[candidatesIndex];
-            uint256 candidateVotes = candidateAddressToCandidate[candidatesAddress].votes;
-            string memory candidateName = candidateAddressToCandidate[candidatesAddress]
-                .candidateName;
-            if (candidateVotes > winnerVotes) {
-                winnerVotes = candidateVotes;
-                winnerAddress = candidatesAddress;
-                winnerName = candidateName;
-            }
-        }
-        winnerCandidateVotes = winnerVotes;
-        winnerCandidateAddress = winnerAddress;
-        winnerCandidateName = winnerName;
-        return (winnerVotes, winnerAddress, winnerName);
+    function getNumWords() public pure returns (uint256) {
+        return NUM_WORDS;
     }
 
-    // Getter functions
-    function getCandidate(
-        uint256 _candidateIndex
-    ) public view returns (address, string memory, uint256, uint256) {
-        address candidateAddress = candidates[_candidateIndex];
-        string memory candidateName = candidateAddressToCandidate[candidateAddress].candidateName;
-        uint256 candidateNumber = candidateAddressToCandidate[candidateAddress].candidateNumber;
-        uint256 candidateVotes = candidateAddressToCandidate[candidateAddress].votes;
-        return (candidateAddress, candidateName, candidateNumber, candidateVotes);
+    function getRequestConfirmations() public pure returns (uint256) {
+        return REQUEST_CONFIRMATIONS;
     }
 
-    function getNumberOfCandidates() public view returns (uint256) {
-        return candidates.length;
+    function getRecentWinner() public view returns (address) {
+        return s_recentWinner;
     }
 
-    function getVoters(uint256 _voterIndex) public view returns (address) {
-        return voters[_voterIndex];
+    function getPlayer(uint256 index) public view returns (address) {
+        return s_players[index];
     }
 
-    function getNumberOfVoters() public view returns (uint256) {
-        return voters.length;
+    function getLatestTimeStamp() public view returns (uint256) {
+        return s_lastTimeStamp;
     }
 
-    function getVoterNumber(address _votersAddress) public view returns (uint256) {
-        return voterAddressToVoter[_votersAddress].voterNumber;
+    function getInterval() public view returns (uint256) {
+        return i_interval;
     }
 
-    function getVoterStatus(address _votersAddress) public view returns (bool) {
-        return voterAddressToVoter[_votersAddress].voted;
+    function getEntranceFee() public view returns (uint256) {
+        return i_entranceFee;
     }
 
-    function getWinnerCandidate() public view returns (uint256, address, string memory) {
-        return (winnerCandidateVotes, winnerCandidateAddress, winnerCandidateName);
+    function getNumberOfPlayers() public view returns (uint256) {
+        return s_players.length;
     }
 }

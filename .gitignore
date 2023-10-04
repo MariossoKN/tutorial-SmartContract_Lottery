@@ -100,3 +100,6 @@ lint/tmp/
 # lint/reports/
 
 gas-report.txt
+
+helper-hardhat-config2.js
+hardhat.config2.js
